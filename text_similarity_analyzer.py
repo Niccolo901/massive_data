@@ -70,9 +70,7 @@ class TextSimilarityAnalyzer:
         # rename columns if present
         if "review/text" in df.columns:
             df = df.withColumnRenamed("review/text", "review_text")
-        if "review/summary" in df.columns:
-            df = df.withColumnRenamed("review/summary", "review_summary")
-
+        
         # keep only valid reviews
         df = (df
             .filter(F.col("review_text").isNotNull() & (F.length("review_text") > 0))
