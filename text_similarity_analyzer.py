@@ -1,10 +1,11 @@
+import os, sys
 from pathlib import Path
 from typing import Optional
 from pyspark.sql import functions as F
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import RegexTokenizer, StopWordsRemover, HashingTF, MinHashLSH
-from pyspark.ml.functions import vector_to_array
 from pyspark.sql import SparkSession
+
 
 
 
@@ -97,12 +98,11 @@ class TextSimilarityAnalyzer:
         # keep only rows with at least 1 token and a nonzero hashed vector
         out = (out
                .withColumn("set_tokens", F.array_distinct(F.col("filtered_tokens")))
-               .filter(F.size("set_tokens") > 3)
-               .withColumn("arr", vector_to_array(F.col("features")))
-               .filter(F.expr("exists(arr, x -> x != 0)"))
-               .drop("arr"))
+               .filter(F.size("set_tokens") >= 5)
+               .drop("tokens", "filtered_tokens", "hashes")
+            )
 
-        return self.model, out.select("review_id", "features", "set_tokens")
+        return self.model, out.select("review_id", "review_text", "features", "set_tokens")
 
     def find_similar_reviews(self, df_feat, topk=None):
         approx_dist = 1.0 - self.jaccard_threshold
@@ -111,11 +111,13 @@ class TextSimilarityAnalyzer:
 
         a = df_feat.select(
             F.col("review_id").alias("i"),
+            F.col("review_text").alias("text_i"),
             F.col("features"),
             F.col("set_tokens").alias("tok_i"),
         )
         b = df_feat.select(
             F.col("review_id").alias("j"),
+            F.col("review_text").alias("text_j"),
             F.col("features"),
             F.col("set_tokens").alias("tok_j"),
         )
@@ -137,18 +139,21 @@ class TextSimilarityAnalyzer:
         )
         pairs = (
             cand
+            # de-duplicate symmetric pairs
             .filter(F.col("i") < F.col("j"))
-            .join(a.select("i", "tok_i"), on="i")
-            .join(b.select("j", "tok_j"), on="j")
+            # join texts + tokens back
+            .join(a.select("i", "text_i", "tok_i"), on="i", how="inner")
+            .join(b.select("j", "text_j", "tok_j"), on="j", how="inner")
+            # exact Jaccard on token sets
             .withColumn("inter_sz", F.size(F.array_intersect("tok_i", "tok_j")))
             .withColumn("union_sz", F.size(F.array_union("tok_i", "tok_j")))
             .withColumn(
                 "jaccard",
                 F.when(F.col("union_sz") > 0, F.col("inter_sz") / F.col("union_sz"))
-                .otherwise(F.lit(0.0)),
+                 .otherwise(F.lit(0.0)),
             )
             .filter(F.col("jaccard") >= F.lit(self.jaccard_threshold))
-            .select("i", "j", "jaccard")
+            .select("i", "j", "jaccard", "text_i", "text_j")
             .orderBy(F.col("jaccard").desc())
         )
 
@@ -187,7 +192,7 @@ class TextSimilarityAnalyzer:
         return cand
 
     def analyze_similarity_pipeline(self, csv_path="./dataset/Books_rating.csv",
-                                  sample_n=None, topk=50):
+                                  sample_n=None, topk= None):
         """
         Complete pipeline: load data, build model, find similarities.
         Returns similar review pairs.
